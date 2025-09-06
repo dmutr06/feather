@@ -3,7 +3,9 @@
 #include <string.h>
 #include  <unistd.h>
 #include <arpa/inet.h>
+#include <stdlib.h>
 #include "feather.h"
+#include <uv.h>
 
 void home_handler(const FeatherRequest *req, FeatherResponse *res) {
     res->status = 200;
@@ -26,9 +28,9 @@ void user_handler(const FeatherRequest *req, FeatherResponse *res) {
 void user_id_handler(const FeatherRequest *req, FeatherResponse *res) {
     res->status = 200;
 
-    char buf[128];
+    char *buf = malloc(128);
     const char *id = req->params[0].value;
-    snprintf(buf, sizeof(buf), "<h2>User Profile: %s</h2>", id ? id : "(null)");
+    snprintf(buf, 128, "<h2>User Profile: %s</h2>", id ? id : "(null)");
     feather_response_set_body(res, buf);
     feather_response_set_header(res, "Content-Type", "text/html");
 }
@@ -106,6 +108,77 @@ int feather_listen(const char *host, int port, FeatherApp *app) {
     return 0;
 }
 
+typedef struct {
+  uv_tcp_t handle;
+  uv_write_t write_req;
+  char rbuf[1024];
+  char wbuf[1024];
+  size_t len;
+  FeatherApp *app;
+} client_t;
+
+void alloc_buf(uv_handle_t *handle, size_t suggested_size, uv_buf_t *buf) {
+  client_t *client = (client_t *) handle->data;
+  *buf = uv_buf_init(client->rbuf, sizeof(client->rbuf));
+}
+
+void write_cb(uv_write_t *req, int status) {
+  client_t *client = (client_t *) req->handle->data;
+
+  // uv_close((uv_handle_t *) &client->handle, NULL);
+
+  // free(client);
+}
+
+void read_cb(uv_stream_t *stream, ssize_t nread, const uv_buf_t *buf) {
+  client_t *client = (client_t *) stream->data;
+
+  if (nread < 0) {
+    uv_close((uv_handle_t *) stream, NULL);
+    free(client);
+    return;
+  }
+
+  printf("%*s", nread, client->rbuf);
+
+  client->len = nread;
+  client->rbuf[nread] = '\0';
+
+  FeatherRequest req = {0};
+  feather_parse_request(&req, client->rbuf);
+  
+  FeatherResponse res = {0};
+
+  FeatherHandler handler = feather_find_handler(client->app, &req);
+  if (handler) {
+      handler(&req, &res);
+  } else {
+      res.status = 404;
+      feather_response_set_body(&res, "Not Found");
+  }
+
+  size_t res_len = feather_dump_response(&res, client->wbuf, sizeof(client->wbuf));
+  printf("%*s", res_len, client->wbuf);
+  uv_buf_t wrbuf = uv_buf_init(client->wbuf, res_len);
+  uv_write(&client->write_req, (uv_stream_t *) &client->handle, &wrbuf, 1, write_cb);
+}
+
+void on_new_conn(uv_stream_t *server, int status) {
+  if (status < 0) return;
+
+  client_t *client = malloc(sizeof(client_t));
+  uv_tcp_init(server->loop, &client->handle);
+  client->handle.data = client;
+  client->app = server->data;
+
+  if (uv_accept(server, (uv_stream_t *) &client->handle) == 0) {
+    uv_read_start((uv_stream_t *) &client->handle, alloc_buf, read_cb);
+  } else {
+    uv_close((uv_handle_t *) &client->handle, NULL);
+    free(client);
+  }
+}
+
 int main() {
     FeatherApp app;
     feather_init_app(&app);
@@ -115,7 +188,21 @@ int main() {
     feather_get(&app, "/user", user_handler);
     feather_get(&app, "/user/:id", user_id_handler);
 
-    feather_listen("0.0.0.0", 6969, &app);
 
-    return 0;
+    uv_loop_t *loop = uv_default_loop();
+    uv_tcp_t server;
+    uv_tcp_init(loop, &server);
+    server.data = &app;
+
+    struct sockaddr_in addr;
+    uv_ip4_addr("localhost", 6969, &addr);
+
+    uv_tcp_bind(&server, (const struct sockaddr *) &addr, 0);
+    int res = uv_listen((uv_stream_t *) &server, 128, on_new_conn);
+
+    if (res) {
+      fprintf(stderr, "Listen error: %s\n", uv_strerror(res));
+    }
+
+    return uv_run(loop, UV_RUN_DEFAULT);
 }
