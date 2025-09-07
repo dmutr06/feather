@@ -51,7 +51,9 @@ typedef struct {
     size_t body_length;
 } FeatherResponse;
 
-typedef void (*FeatherHandler)(const FeatherRequest *req, FeatherResponse *res);
+typedef struct FeatherCtx FeatherCtx;
+
+typedef void (*FeatherHandler)(const FeatherRequest *req, FeatherCtx *ctx);
 
 typedef enum { FEATHER_ROUTE_STATIC, FEATHER_ROUTE_REGEX } FeatherRouteType;
 
@@ -77,7 +79,6 @@ void feather_response_set_header(FeatherResponse *res, const char *key, const ch
 void feather_response_set_body(FeatherResponse *res, const char *body);
 void feather_response_set_body_n(FeatherResponse *res, const char *body, size_t len);
 
-
 void feather_init_app(FeatherApp *app);
 void feather_add_route(FeatherApp *app, FeatherMethod method, const char *path, FeatherHandler handler);
 
@@ -88,5 +89,11 @@ FeatherHandler feather_find_handler(const FeatherApp *app, FeatherRequest *req);
 
 void feather_log(const char *fmt, ...);
 void feather_log_request(const FeatherRequest *req);
+
+// Platform-dependent funcs
+int feather_run(FeatherApp *app);
+void feather_response_send(FeatherCtx *ctx, const FeatherResponse *res);
+void feather_sleep_fd(int fd, int events);
+void feather_sleep_ms(int ms);
 
 #endif // __FEATHER_H__

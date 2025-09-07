@@ -190,14 +190,28 @@ void feather_add_route(FeatherApp *app, FeatherMethod method, const char *path, 
     app->route_count += 1;
 }
 
+static void strip_trailing_slash(char *s) {
+    size_t len = strlen(s);
+    if (len > 1 && s[len - 1] == '/') {
+        s[len - 1] = '\0';
+    }
+}
 
 static int feather_match_route(const char *pattern, FeatherRequest *req) {
     req->param_count = 0;
+
+
+    if (strcmp(req->path, "/") == 0) {
+        return strcmp(pattern, "/") == 0;
+    }
 
     char pattern_copy[256];
     char path_copy[256];
     strcpy(pattern_copy, pattern);
     strcpy(path_copy, req->path);
+
+    strip_trailing_slash(pattern_copy);
+    strip_trailing_slash(path_copy);
 
     char *p_ptr = pattern_copy;
     char *r_ptr = path_copy;
@@ -288,3 +302,4 @@ void feather_log_request(const FeatherRequest *req) {
         feather_log("  Body (%zu bytes): %s", req->body_length, buf);
     }
 }
+
