@@ -1,5 +1,5 @@
 CC = gcc
-CFLAGS = -Wall -Wextra -O2 -g -Iinclude
+CFLAGS = -Wall -Wextra -O3 -march=native -Iinclude
 LDFLAGS = 
 
 BUILD = build

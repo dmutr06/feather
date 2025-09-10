@@ -2,73 +2,67 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdint.h>
+#include <threads.h>
 #include <ucontext.h>
 #include <sys/epoll.h>
 #include <errno.h>
 #include <sys/timerfd.h>
 #include <unistd.h>
+#include "dyn_arr.h"
 
-#define MAX_COROS 1024
-
-static ucontext_t main_ctx;
-static Coro coros[MAX_COROS] = {0};
-static int count = 0;
-static int cur = -1;
-static int epoll_fd;
-
-static int find_free_slot(void) {
-    for (int i = 0; i < count ; i++) {
-        if (coros[i].state == CORO_FINISHED) {
-            return i;
-        }
-    }
-
-    return -1;
-}
+thread_local static ucontext_t main_ctx;
+thread_local static DynArr(Coro *) ready_coros = {0};
+thread_local static DynArr(Coro *) finished_coros = {0};
+thread_local static size_t sleeping_coros_count = 0;
+thread_local static int epoll_fd;
 
 void coro_destroy(Coro *coro) {
     free(coro->stack);
 }
 
-void coro_trampoline(uintptr_t ptr) {
-    int id = (int) ptr;
-    Coro *coro = &coros[id];
+static void coro_trampoline(uintptr_t ptr) {
+    Coro *coro = (Coro *) ptr;
     coro->state = CORO_RUNNING;
 
     coro->entry.func(coro->entry.arg);
 
     coro->state = CORO_FINISHED;
+    darr_push(&finished_coros, coro);
 
     setcontext(&main_ctx);
 }
 
-int coro_create(void (*func)(void *), void *arg) {
-    int id = find_free_slot();
-
-    if (id < 0) {
-        id = count++;
-        coros[id].stack = malloc(CORO_STACK_SIZE);
-    }
-
-    Coro *coro = &coros[id];
-
+static void coro_reset(Coro *coro, void (*func)(void *), void *arg) {
+    coro->waiting_events = 0;
+    coro->waiting_fd = -1;
+    coro->state = CORO_READY;
     coro->entry.func = func;
     coro->entry.arg = arg;
-    coro->state = CORO_READY;
-    coro->waiting_fd = -1;
-
     getcontext(&coro->ctx);
     coro->ctx.uc_stack.ss_sp = coro->stack;
     coro->ctx.uc_stack.ss_size = CORO_STACK_SIZE;
     coro->ctx.uc_link = &main_ctx;
-    makecontext(&coro->ctx, (void(*)(void)) coro_trampoline, 1, id);
-
-    return id;
+    makecontext(&coro->ctx, (void (*)(void)) coro_trampoline, 1, (uintptr_t) coro);
 }
 
+Coro *coro_spawn(void (*func)(void *), void *arg) {
+    Coro *coro;
+    if (finished_coros.size > 0) {
+        coro = finished_coros.items[finished_coros.size - 1]; 
+        darr_pop(&finished_coros);
+    } else {
+        coro = (Coro *) malloc(sizeof(Coro));
+        coro->stack = malloc(CORO_STACK_SIZE);
+    }
+
+    coro_reset(coro, func, arg);
+    darr_push(&ready_coros, coro);
+
+    return coro;
+}
 
 void coro_yield(void) {
-    Coro *coro = &coros[cur];
+    Coro *coro = ready_coros.items[0];
     coro->state = CORO_SUSPENDED;
     swapcontext(&coro->ctx, &main_ctx);
 }
@@ -79,14 +73,16 @@ void coro_sleep_fd(int fd, int events) {
         return;
     }
 
-    Coro *coro = &coros[cur];
+    Coro *coro = ready_coros.items[0];
     coro->state = CORO_SLEEPING;
     coro->waiting_fd = fd;
     coro->waiting_events = events;
 
+    sleeping_coros_count += 1;
+
     struct epoll_event ev = {
         .events = events,
-        .data.u32 = cur
+        .data.ptr = coro
     };
 
     if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD, fd, &ev) < 0) {
@@ -120,6 +116,8 @@ void coro_sleep_ms(int ms) {
     }
 
     coro_sleep_fd(tfd, EPOLLIN);
+    int a;
+    read(tfd, &a, 4);
     close(tfd);
 }
 
@@ -129,43 +127,48 @@ void coro_start(void) {
     epoll_fd = epoll_create1(0);
     struct epoll_event events[64];
 
-    while (1) {
-        int active = 0;
-        int ready_count = 0;
-        int sleeping_count = 0;
+    while (ready_coros.size > 0 || sleeping_coros_count > 0) {
+        while (ready_coros.size > 0) {
+            Coro *coro = ready_coros.items[0];
 
-        for (int i = 0; i < count; ++i) {
-            if (coros[i].state == CORO_READY || coros[i].state == CORO_SUSPENDED) {
-                ready_count += 1;
-                cur = i;
-                coros[i].state = CORO_RUNNING;
-                swapcontext(&main_ctx, &coros[i].ctx);
-            } else if (coros[i].state == CORO_SLEEPING) {
-                sleeping_count += 1;
-            } 
+            coro->state = CORO_RUNNING;
+            swapcontext(&main_ctx, &coro->ctx);
 
-            if (coros[i].state != CORO_FINISHED) {
-                active += 1;
+            if (coro->state == CORO_FINISHED || coro->state == CORO_SLEEPING) {
+                ready_coros.items[0] = ready_coros.items[ready_coros.size - 1];
+                ready_coros.size -= 1;
+            }
+
+            else {
+                ready_coros.items[0] = ready_coros.items[ready_coros.size - 1];
+                ready_coros.items[ready_coros.size - 1] = coro;
             }
         }
 
-        if (active == 0) break;
 
-        if (sleeping_count == 0) continue;
+        if (!sleeping_coros_count) continue;
+        int n = epoll_wait(epoll_fd, events, 64, ready_coros.size > 0 ? 0 : -1);
 
-        int n = epoll_wait(epoll_fd, events, 64, ready_count > 0 ? 0 : -1);
         for (int i = 0; i < n; ++i) {
-            int id = events[i].data.u32;
-            Coro *coro = &coros[id];
-            coro->state = CORO_READY;
-            epoll_ctl(epoll_fd, EPOLL_CTL_DEL, coro->waiting_fd, NULL);
-            coro->waiting_fd = -1;
+            Coro *coro = (Coro *) events[i].data.ptr;
+            if (events[i].events & coro->waiting_events) {
+                coro->state = CORO_READY;
+                epoll_ctl(epoll_fd, EPOLL_CTL_DEL, coro->waiting_fd, NULL);
+                coro->waiting_fd = -1;
+                coro->waiting_events = 0;
+                sleeping_coros_count -= 1;
+                darr_push(&ready_coros, coro);
+            }
         }
     }
 
     close(epoll_fd);
 
-    for (int i = 0; i < count; ++i) {
-        coro_destroy(&coros[i]);
+    darr_foreach(Coro *, &ready_coros, coro) {
+        coro_destroy(*coro);
+    }
+
+    darr_foreach(Coro *, &finished_coros, coro) {
+        coro_destroy(*coro);
     }
 }

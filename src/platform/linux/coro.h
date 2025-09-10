@@ -29,7 +29,7 @@ struct Coro {
     int waiting_events;
 };
 
-int coro_create(void (*func)(void *), void *arg);
+Coro *coro_spawn(void (*func)(void *), void *arg);
 void coro_start(void);
 void coro_yield(void);
 void coro_sleep_fd(int fd, int events);

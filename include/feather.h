@@ -91,8 +91,8 @@ void feather_log(const char *fmt, ...);
 void feather_log_request(const FeatherRequest *req);
 
 // Platform-dependent funcs
-int feather_run(FeatherApp *app);
-void feather_response_send(FeatherCtx *ctx, const FeatherResponse *res);
+int feather_run(FeatherApp *app, int port);
+void feather_response_send(FeatherCtx *ctx, FeatherResponse *res);
 void feather_sleep_fd(int fd, int events);
 void feather_sleep_ms(int ms);
 
