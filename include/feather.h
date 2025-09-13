@@ -2,6 +2,7 @@
 #define __FEATHER_H__
 
 #include <stddef.h>
+#include "strview.h"
 
 #define __FEATHER_MAX_PARAMS 16
 
@@ -23,32 +24,30 @@ typedef enum {
 } FeatherMethod;
 
 typedef struct {
-    char *key;
-    char *value;
+    StrView key;
+    StrView value;
 } FeatherHeader;
 
 typedef struct {
-    const char *key;
-    const char *value;
+    StrView key;
+    StrView value;
 } FeatherParam;
 
 typedef struct {
     FeatherMethod method;
-    char *path;
+    StrView path;
     FeatherParam params[__FEATHER_MAX_PARAMS];
     size_t param_count;
     FeatherHeader *headers;
     size_t header_count;
-    char *body;
-    size_t body_length;
+    StrView body;
 } FeatherRequest;
 
 typedef struct {
     int status;
     FeatherHeader *headers;
     size_t header_count;
-    const char *body;
-    size_t body_length;
+    StrView body;
 } FeatherResponse;
 
 typedef struct FeatherCtx FeatherCtx;
@@ -59,7 +58,7 @@ typedef enum { FEATHER_ROUTE_STATIC, FEATHER_ROUTE_REGEX } FeatherRouteType;
 
 typedef struct {
     FeatherRouteType type;
-    const char *pattern;
+    StrView pattern;
     FeatherMethod method;
     FeatherHandler handler;
 } FeatherRoute;
@@ -70,14 +69,15 @@ typedef struct {
 } FeatherApp;
 
 const char *feather_method_to_str(FeatherMethod method);
-FeatherMethod feather_str_to_method(const char *str);
+FeatherMethod feather_sv_to_method(StrView sv);
 
-void feather_parse_request(FeatherRequest *req, char *raw);
+void feather_parse_request(FeatherRequest *req, StrView raw);
 
 size_t feather_dump_response(const FeatherResponse *response, char *buf, size_t buf_size);
-void feather_response_set_header(FeatherResponse *res, const char *key, const char *value);
-void feather_response_set_body(FeatherResponse *res, const char *body);
-void feather_response_set_body_n(FeatherResponse *res, const char *body, size_t len);
+void feather_response_remove_header(FeatherResponse *res, StrView key);
+void feather_response_set_header(FeatherResponse *res, StrView key, StrView value);
+
+StrView feather_request_get_header(const FeatherRequest* req, StrView header);
 
 void feather_init_app(FeatherApp *app);
 void feather_add_route(FeatherApp *app, FeatherMethod method, const char *path, FeatherHandler handler);

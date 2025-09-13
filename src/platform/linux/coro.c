@@ -166,9 +166,14 @@ void coro_start(void) {
 
     darr_foreach(Coro *, &ready_coros, coro) {
         coro_destroy(*coro);
+        free(*coro);
     }
 
     darr_foreach(Coro *, &finished_coros, coro) {
         coro_destroy(*coro);
+        free(*coro);
     }
+
+    darr_deinit(&ready_coros);
+    darr_deinit(&finished_coros);
 }

@@ -3,7 +3,7 @@
 
 #include <ucontext.h>
 
-#define CORO_STACK_SIZE 1024 * 64
+#define CORO_STACK_SIZE (1024 * 64)
 
 typedef enum {
     CORO_READY,

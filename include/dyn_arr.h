@@ -38,7 +38,7 @@
     for (size_t i = 0; i < (arr)->size; ++i) { \
       (arr)->deinit_item((arr)->items + i); \
     } \
-    free((arr)->items); \
+  free((arr)->items); \
 } while (0) \
 
 #define darr_pop(arr) do { \

@@ -1,7 +1,9 @@
 #include "feather.h"
 #include "coro.h"
+#include "strview.h"
 #include <errno.h>
 #include <fcntl.h>
+#include <sched.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -9,6 +11,7 @@
 #include <strings.h>
 #include <sys/epoll.h>
 #include <sys/socket.h>
+#include <threads.h>
 #include <unistd.h>
 #include <arpa/inet.h>
 #include <pthread.h>
@@ -19,6 +22,8 @@ struct FeatherCtx {
 };
 
 static FeatherApp *_app;
+
+thread_local static int counter = 0;
 
 static int set_nonblocking(int fd) {
     int flags = fcntl(fd, F_GETFL, 0);
@@ -53,32 +58,24 @@ static int http_request_complete_buf(ConnBuf *cbuf) {
 }
 
 static void handle_client(void *arg) {
+    counter += 1;
     int cfd = (intptr_t) arg;
     set_nonblocking(cfd);
 
     FeatherCtx ctx = { .fd = cfd, .keep_alive = 1 };
     while (ctx.keep_alive) {
-        char buf[4096];
+        char buf[8192];
         ConnBuf cbuf = {0};
         cbuf.buf = buf;
         ssize_t total = 0;
 
-        while (1) {
-            ssize_t n = recv(cfd, buf, sizeof(buf) - 1, 0);
+        while (!http_request_complete_buf(&cbuf)) {
+            ssize_t n = recv(cfd, buf + total, sizeof(buf) - total - 1, 0);
 
             if (n > 0) {
                 total += n;
                 cbuf.len = total;
-                if (http_request_complete_buf(&cbuf)) {
-                    buf[total] = '\0';
-                    break;
-                };
                 continue;
-            }
-
-            if (n == 0 && !ctx.keep_alive) {
-                close(cfd);
-                return;
             }
 
             if (errno == EAGAIN || errno == EWOULDBLOCK) {
@@ -90,18 +87,48 @@ static void handle_client(void *arg) {
             return;
         }
 
+        char *header_end = strstr(buf, "\r\n\r\n");
+        if (!header_end) {
+            close(cfd);
+            return;
+        }
+        size_t headers_end = (header_end - buf) + 4;
+
         FeatherRequest req = {0};
-        feather_parse_request(&req, buf);
-        total  = 0;
+        feather_parse_request(&req, sv_from_buf(buf, headers_end));
+
+        size_t content_length = 0;
+        StrView cl = feather_request_get_header(&req, SV_LIT("Content-Length"));
+
+        if (cl.len > 0) {
+            content_length = sv_atoi(cl);
+        }
+
+        while ((size_t) total < headers_end + content_length) {
+            ssize_t n = recv(cfd, buf + total, sizeof(buf) - total - 1, 0);
+            if (n > 0) {
+                total += n;
+                continue;
+            }
+
+            if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                coro_sleep_fd(cfd, EPOLLIN);
+                continue;
+            }
+
+            close(cfd);
+            return;
+        }
+
+        req.body = sv_from_buf(buf + headers_end, content_length);
 
         for (size_t i = 0; i < req.header_count; ++i) {
-            if (strcasecmp("Connection", req.headers[i].key) == 0) {
-                if (strcmp(req.headers[i].value, "close") == 0) {
+            if (sv_ieq(req.headers[i].key, SV_LIT("Connection"))) {
+                if (sv_ieq(req.headers[i].value, SV_LIT("close"))) {
                     ctx.keep_alive = 0;
                 }
             } 
         }
-
 
         FeatherHandler h = feather_find_handler(_app, &req);
 
@@ -110,8 +137,14 @@ static void handle_client(void *arg) {
         } else {
             FeatherResponse res = {0};
             res.status = 404;
-            feather_response_set_body(&res, "Not Found");
+            req.body = SV_LIT("Not Found");
             feather_response_send(&ctx, &res);
+        }
+
+        if (req.headers) {
+            free(req.headers);
+            req.headers = NULL;
+            req.header_count = 0;
         }
     }
 }
@@ -175,8 +208,23 @@ static void accept_loop(void *arg) {
 
 #define NUM_WORKERS 6
 
+static void debugger(void *arg) {
+    (void) arg;
+
+    while (1) {
+        char buf[256];
+        feather_sleep_fd(STDIN_FILENO, EPOLLIN);
+        ssize_t n = read(STDIN_FILENO, buf, sizeof(buf)); 
+
+        if (sv_eq(sv_from_buf(buf, n), "conns\n")) {
+            printf("Current connection counter: %d\n", counter);
+        }
+    }
+}
+
 static void *worker(void *arg) {
     coro_spawn(accept_loop, arg);
+    coro_spawn(debugger, NULL);
 
     coro_start();
 
@@ -204,14 +252,14 @@ void feather_response_send(FeatherCtx *ctx, FeatherResponse *res) {
 
     char buf[1024];
     if (!ctx->keep_alive) {
-        feather_response_set_header(res, "Connection", "close");
+        feather_response_set_header(res, SV_LIT("Connection"), SV_LIT("close"));
     }
 
 
     char content_length[21];
-    if (res->body) {
-        snprintf(content_length, sizeof(content_length), "%zu", res->body_length);
-        feather_response_set_header(res, "Content-Length", content_length);
+    if (res->body.len > 0) {
+        snprintf(content_length, sizeof(content_length), "%zu", res->body.len);
+        feather_response_set_header(res, SV_LIT("Content-Length"), sv_from_cstr(content_length));
     }
 
     size_t len = feather_dump_response(res, buf, sizeof(buf));
@@ -231,8 +279,13 @@ void feather_response_send(FeatherCtx *ctx, FeatherResponse *res) {
         sent_total += (size_t) sent;
     }
 
+    if (res->headers) {
+        free(res->headers);
+    }
+
     if (!ctx->keep_alive) {
         close(ctx->fd);
+        counter -= 1;
     }
 }
 
