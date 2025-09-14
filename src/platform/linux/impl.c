@@ -98,10 +98,9 @@ static void handle_client(void *arg) {
         feather_parse_request(&req, sv_from_buf(buf, headers_end));
 
         size_t content_length = 0;
-        StrView cl = feather_request_get_header(&req, SV_LIT("Content-Length"));
 
-        if (cl.len > 0) {
-            content_length = sv_atoi(cl);
+        if (req.headers.content_length.len > 0) {
+            content_length = sv_atoi(req.headers.content_length);
         }
 
         while ((size_t) total < headers_end + content_length) {
@@ -122,12 +121,8 @@ static void handle_client(void *arg) {
 
         req.body = sv_from_buf(buf + headers_end, content_length);
 
-        for (size_t i = 0; i < req.header_count; ++i) {
-            if (sv_ieq(req.headers[i].key, SV_LIT("Connection"))) {
-                if (sv_ieq(req.headers[i].value, SV_LIT("close"))) {
-                    ctx.keep_alive = 0;
-                }
-            } 
+        if (sv_ieq(req.headers.connection, "close")) {
+            ctx.keep_alive = 0;
         }
 
         FeatherHandler h = feather_find_handler(_app, &req);
@@ -137,15 +132,12 @@ static void handle_client(void *arg) {
         } else {
             FeatherResponse res = {0};
             res.status = 404;
-            req.body = SV_LIT("Not Found");
+            res.body = SV_LIT("<h3>Not Found</h3>");
+            res.headers.content_type = SV_LIT("text/html");
             feather_response_send(&ctx, &res);
         }
 
-        if (req.headers) {
-            free(req.headers);
-            req.headers = NULL;
-            req.header_count = 0;
-        }
+        darr_deinit(&req.headers.other);
     }
 }
 
@@ -208,23 +200,8 @@ static void accept_loop(void *arg) {
 
 #define NUM_WORKERS 6
 
-static void debugger(void *arg) {
-    (void) arg;
-
-    while (1) {
-        char buf[256];
-        feather_sleep_fd(STDIN_FILENO, EPOLLIN);
-        ssize_t n = read(STDIN_FILENO, buf, sizeof(buf)); 
-
-        if (sv_eq(sv_from_buf(buf, n), "conns\n")) {
-            printf("Current connection counter: %d\n", counter);
-        }
-    }
-}
-
 static void *worker(void *arg) {
     coro_spawn(accept_loop, arg);
-    coro_spawn(debugger, NULL);
 
     coro_start();
 
@@ -252,14 +229,14 @@ void feather_response_send(FeatherCtx *ctx, FeatherResponse *res) {
 
     char buf[1024];
     if (!ctx->keep_alive) {
-        feather_response_set_header(res, SV_LIT("Connection"), SV_LIT("close"));
+        res->headers.connection = SV_LIT("close");
     }
 
 
     char content_length[21];
     if (res->body.len > 0) {
-        snprintf(content_length, sizeof(content_length), "%zu", res->body.len);
-        feather_response_set_header(res, SV_LIT("Content-Length"), sv_from_cstr(content_length));
+        int n = snprintf(content_length, sizeof(content_length), "%zu", res->body.len);
+        res->headers.content_length = sv_from_buf(content_length, n);
     }
 
     size_t len = feather_dump_response(res, buf, sizeof(buf));
@@ -279,9 +256,7 @@ void feather_response_send(FeatherCtx *ctx, FeatherResponse *res) {
         sent_total += (size_t) sent;
     }
 
-    if (res->headers) {
-        free(res->headers);
-    }
+    darr_deinit(&res->headers.other);
 
     if (!ctx->keep_alive) {
         close(ctx->fd);

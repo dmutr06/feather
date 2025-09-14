@@ -7,7 +7,43 @@ void home_handler(const FeatherRequest *req, FeatherCtx *ctx) {
 
     FeatherResponse res = {0};
     res.status = 200;
-    res.body = SV_LIT("Hello, World!");
+    res.body = SV_LIT(
+        "<!DOCTYPE html>"
+        "<html>"
+            "<head>"
+                "<title>Feather</title>"
+                "<link rel=\"stylesheet\" href=\"styles.css\" />"
+            "<head>"
+            "<body>"
+                "<h1 class=\"title\">Feather Web Framework</h1>"
+                "<div class=\"subtitle\">it's pretty cool</div>"
+            "</body>"
+        "</html>"
+    );
+
+    feather_response_send(ctx, &res);
+}
+
+void home_styles_handler(const FeatherRequest *req, FeatherCtx *ctx) {
+    (void) req;
+
+    FeatherResponse res = {0};
+    res.status = 200;
+    res.body = SV_LIT(
+        "body {"
+            "background-color: #000;"
+            "color: #fff;"
+        "}"
+        ".title {"
+            "text-align: center;"
+            "font-size: 32px;"
+        "}"
+        ".subtitle {"
+            "text-align: center;"
+            "margin-top: 8px;"
+            "font-size: 24px;"
+        "}"
+    );
 
     feather_response_send(ctx, &res);
 }
@@ -18,7 +54,7 @@ void about_handler(const FeatherRequest *req, FeatherCtx *ctx) {
     FeatherResponse res = {0};
     res.status = 200;
     res.body = SV_LIT("<h2>About page</h2>");
-    feather_response_set_header(&res, SV_LIT("Content-Type"), SV_LIT("text/html"));
+    res.headers.content_type = SV_LIT("text/html");
 
     feather_response_send(ctx, &res);
 }
@@ -30,7 +66,7 @@ void user_handler(const FeatherRequest *req, FeatherCtx *ctx) {
     snprintf(body, sizeof(body) - 1, "<h1>Hello, "SV_FMT"</h1>", SV_ARG(req->params[0].value));
     res.status = 200;
     res.body = sv_from_cstr(body);
-    feather_response_set_header(&res, SV_LIT("Content-Type"), SV_LIT("text/html"));
+    res.headers.content_type = SV_LIT("text/html");
 
     feather_response_send(ctx, &res);
 }
@@ -51,6 +87,7 @@ int main() {
     feather_init_app(&app);
 
     feather_get(&app, "/home", home_handler);
+    feather_get(&app, "/styles.css", home_styles_handler);
     feather_get(&app, "/about", about_handler);
     feather_get(&app, "/user/:id", user_handler);
     feather_post(&app, "/user", new_user_handler);

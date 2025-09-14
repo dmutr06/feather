@@ -63,10 +63,7 @@ void feather_parse_request(FeatherRequest *req, StrView raw) {
             value.len -= 1;
         }
 
-        req->headers = realloc(req->headers, (req->header_count + 1) * sizeof(FeatherHeader));
-        req->headers[req->header_count].key = key;
-        req->headers[req->header_count].value = value;
-        req->header_count += 1;
+        feather_set_header(&req->headers, key, value);
     }
 
     req->body = raw;
@@ -95,26 +92,30 @@ size_t feather_dump_response(const FeatherResponse *res, char *buf, size_t buf_s
     if (n < 0 || (size_t) n >= buf_size - offset) return 0;
     offset += (size_t) n;
 
-    for (size_t i = 0; i < res->header_count; ++i) {
-        n = snprintf(buf + offset, buf_size - offset, SV_FMT": "SV_FMT"\r\n", SV_ARG(res->headers[i].key), SV_ARG(res->headers[i].value));
-        if (n < 0 || (size_t) n >= buf_size - offset) return 0;
-        offset += (size_t) n;
-    }
+#define WRITE_HEADER(key, value) \
+    do { \
+        if ((value).len > 0) { \
+            n = snprintf(buf + offset, buf_size - offset, SV_FMT": "SV_FMT"\r\n", SV_ARG(key), SV_ARG(value)); \
+            if (n < 0 || (size_t) n >= buf_size - offset) return 0; \
+            offset += (size_t) n; \
+        } \
+    } while (0)
 
-    int has_len = 0;
+    WRITE_HEADER(SV_LIT("Authorization"), res->headers.authorization);
+    WRITE_HEADER(SV_LIT("Cookie"), res->headers.cookie);
+    WRITE_HEADER(SV_LIT("Content-Type"), res->headers.content_type);
+    WRITE_HEADER(SV_LIT("Content-Length"), res->headers.content_length);
 
-    for (size_t i = 0; i < res->header_count; ++i) {
-        if (sv_ieq(res->headers[i].key, "Content-Length")) {
-            has_len = 1;
-            break;
-        }
-    }
-
-    if (!has_len && res->body.len > 0) {
+    if (!res->headers.content_length.len && res->body.len > 0) {
         n = snprintf(buf + offset, buf_size - offset, "Content-Length: %zu\r\n", res->body.len);
         if (n < 0 || (size_t) n >= buf_size - offset) return 0;
         offset += (size_t) n;
     }
+
+    darr_foreach(FeatherHeader, &res->headers.other, header) {
+        WRITE_HEADER(header->key, header->value);
+    }
+#undef WRITE_HEADER
 
     if (offset + 2 >= buf_size) return 0;
 
@@ -130,22 +131,50 @@ size_t feather_dump_response(const FeatherResponse *res, char *buf, size_t buf_s
     return offset;
 }
 
-void feather_response_set_header(FeatherResponse *res, StrView key, StrView value) {
-    if (!res || !key.len || !value.len) return;
-
-    for (size_t i = 0; i < res->header_count; ++i) {
-        if (sv_ieq(res->headers[i].key, key)) {
-            res->headers[i].key = key;
-            res->headers[i].value = value;
-            return;
+void feather_set_header(FeatherHeaders *headers, StrView key, StrView value) {
+    if (sv_ieq(key, "Authorization")) {
+        headers->authorization = value;
+    } else if (sv_ieq(key, "Cookie")) {
+        headers->cookie = value;
+    } else if (sv_ieq(key, "Content-Type")) {
+        headers->content_type = value;
+    } else if (sv_ieq(key, "Content-Length")) {
+        headers->content_length = value;
+    } else if (sv_ieq(key, "Connection")) {
+        headers->connection = value;
+    } else {
+        darr_foreach(FeatherHeader, &headers->other, header) {
+            if (sv_ieq(header->key, key)) {
+                header->value = value;
+                return;
+            }
         }
-    }
 
-    res->headers = realloc(res->headers, (res->header_count + 1) * sizeof(FeatherHeader));
-    res->headers[res->header_count].key = key;
-    res->headers[res->header_count].value = value;
-    res->header_count += 1;
+        darr_push(&headers->other, ((FeatherHeader) { key, value }));
+    }
 }
+
+StrView feather_get_header(const FeatherHeaders *headers, StrView key) {
+    if (sv_ieq(key, "Authorization")) {
+        return headers->authorization;
+    } else if (sv_ieq(key, "Cookie")) {
+        return headers->cookie;
+    } else if (sv_ieq(key, "Content-Type")) {
+        return headers->content_type;
+    } else if (sv_ieq(key, "Content-Length")) {
+        return headers->content_length;
+    } else if (sv_ieq(key, "Connection")) {
+        return headers->connection;
+    } else {
+        darr_foreach(FeatherHeader, &headers->other, header) {
+            if (sv_ieq(header->key, key)) {
+                return header->value;
+            }
+        }
+
+        return sv_from_buf(NULL, 0);
+    }
+} 
 
 void feather_init_app(FeatherApp *app) {
     app->routes = NULL;
@@ -239,28 +268,6 @@ void feather_log(const char *fmt, ...) {
     va_end(args);
 }
 
-void feather_response_remove_header(FeatherResponse *res, StrView key) {
-    if (!res || !key.len || res->header_count == 0) return;
-
-    for (size_t i = 0; i < res->header_count; i++) {
-        if (sv_ieq(res->headers[i].key, key) == 0) {
-            for (size_t j = i; j + 1 < res->header_count; j++) {
-                res->headers[j] = res->headers[j + 1];
-            }
-
-            res->header_count -= 1;
-            res->headers = realloc(res->headers, res->header_count * sizeof(FeatherHeader));
-            return;
-        }
-    }
-}
-
-StrView feather_request_get_header(const FeatherRequest *req, StrView header) {
-    for (size_t i = 0; i < req->header_count; ++i) {
-        if (sv_ieq(req->headers[i].key, header)) {
-            return req->headers[i].value;
-        }
-    }
-
-    return sv_from_buf(NULL, 0);
+void feather_remove_header(FeatherHeaders *headers, StrView key) {
+    feather_set_header(headers, key, sv_from_buf(NULL, 0));
 }

@@ -3,6 +3,7 @@
 
 #include <stddef.h>
 #include "strview.h"
+#include "dyn_arr.h"
 
 #define __FEATHER_MAX_PARAMS 16
 
@@ -29,6 +30,16 @@ typedef struct {
 } FeatherHeader;
 
 typedef struct {
+    StrView authorization;
+    StrView cookie;
+    StrView content_type;
+    StrView content_length;
+    StrView connection;
+
+    DynArr(FeatherHeader) other;
+} FeatherHeaders;
+
+typedef struct {
     StrView key;
     StrView value;
 } FeatherParam;
@@ -38,15 +49,13 @@ typedef struct {
     StrView path;
     FeatherParam params[__FEATHER_MAX_PARAMS];
     size_t param_count;
-    FeatherHeader *headers;
-    size_t header_count;
+    FeatherHeaders headers;
     StrView body;
 } FeatherRequest;
 
 typedef struct {
     int status;
-    FeatherHeader *headers;
-    size_t header_count;
+    FeatherHeaders headers;
     StrView body;
 } FeatherResponse;
 
@@ -75,9 +84,9 @@ void feather_parse_request(FeatherRequest *req, StrView raw);
 
 size_t feather_dump_response(const FeatherResponse *response, char *buf, size_t buf_size);
 void feather_response_remove_header(FeatherResponse *res, StrView key);
-void feather_response_set_header(FeatherResponse *res, StrView key, StrView value);
+void feather_set_header(FeatherHeaders *headers, StrView key, StrView value);
 
-StrView feather_request_get_header(const FeatherRequest* req, StrView header);
+StrView feather_get_header(const FeatherHeaders* headers, StrView header);
 
 void feather_init_app(FeatherApp *app);
 void feather_add_route(FeatherApp *app, FeatherMethod method, const char *path, FeatherHandler handler);
